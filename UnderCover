@@ -1,0 +1,1409 @@
+chmod +x start.sh stop.sh
+./start.sh
+undercover-app/
+├── client/                 # React Frontend
+│   ├── public/
+│   └── src/
+│       ├── components/
+│       ├── pages/
+│       ├── services/
+│       └── utils/
+├── server/                 # Node.js Backend
+│   ├── controllers/
+│   ├── models/
+│   ├── routes/
+│   └── middleware/
+├── database/               # MongoDB setup
+└── docker-compose.yml      # Container setup
+
+version: '3.8'
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: undercover-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: undercover
+    volumes:
+      - mongodb_data:/data/db
+  
+  backend:
+    build: ./server
+    container_name: undercover-backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/undercover?authSource=admin
+      - JWT_SECRET=undercover_secret_key_2024_change_this
+      - NODE_ENV=development
+    depends_on:
+      - mongodb
+  
+  frontend:
+    build: ./client
+    container_name: undercover-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  mongodb_data:
+  
+  {
+  "name": "undercover-backend",
+  "version": "1.0.0",
+  "description": "Backend for UnderCover Social Media App",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.0.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.6.1",
+    "validator": "^13.9.0",
+    "express-rate-limit": "^6.9.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 5000
+CMD ["npm", "start"]
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const http = require('http');
+const socketIo = require('socket.io');
+require('dotenv').config();
+
+// Import routes
+const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/users');
+const postRoutes = require('./routes/posts');
+const messageRoutes = require('./routes/messages');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true
+  }
+});
+
+// Middleware
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  credentials: true
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Database connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/undercover', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('✅ MongoDB connected'))
+.catch(err => console.log('❌ MongoDB connection error:', err));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/posts', postRoutes);
+app.use('/api/messages', messageRoutes);
+
+// WebSocket for real-time features
+io.on('connection', (socket) => {
+  console.log('New client connected:', socket.id);
+  
+  socket.on('join-room', (userId) => {
+    socket.join(userId);
+    console.log(`User ${userId} joined their room`);
+  });
+  
+  socket.on('send-message', (data) => {
+    io.to(data.receiverId).emit('receive-message', data);
+  });
+  
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Something went wrong!'
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`🚀 UnderCover Backend running on port ${PORT}`);
+});
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const validator = require('validator');
+
+const userSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    minlength: 3,
+    maxlength: 30
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    validate: [validator.isEmail, 'Please provide a valid email']
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6,
+    select: false
+  },
+  fullName: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  bio: {
+    type: String,
+    maxlength: 500,
+    default: ''
+  },
+  profilePicture: {
+    type: String,
+    default: 'https://res.cloudinary.com/demo/image/upload/v1617189057/default-profile.png'
+  },
+  coverPhoto: {
+    type: String,
+    default: ''
+  },
+  friends: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  friendRequests: [{
+    from: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    status: { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  isOnline: {
+    type: Boolean,
+    default: false
+  },
+  lastSeen: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  timestamps: true
+});
+
+// Hash password before saving
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 12);
+  next();
+});
+
+// Compare password method
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  return await bcrypt.compare(candidatePassword, this.password);
+};
+
+module.exports = mongoose.model('User', userSchema);
+const mongoose = require('mongoose');
+
+const postSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  content: {
+    type: String,
+    required: true,
+    maxlength: 5000
+  },
+  images: [{
+    type: String
+  }],
+  likes: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  comments: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    content: { type: String, required: true },
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    createdAt: { type: Date, default: Date.now }
+  }],
+  shares: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  isPublic: {
+    type: Boolean,
+    default: true
+  },
+  tags: [{
+    type: String
+  }]
+}, {
+  timestamps: true
+});
+
+module.exports = mongoose.model('Post', postSchema);
+const mongoose = require('mongoose');
+
+const messageSchema = new mongoose.Schema({
+  conversation: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Conversation',
+    required: true
+  },
+  sender: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  receiver: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  content: {
+    type: String,
+    required: true
+  },
+  isRead: {
+    type: Boolean,
+    default: false
+  },
+  readAt: {
+    type: Date
+  }
+}, {
+  timestamps: true
+});
+
+const conversationSchema = new mongoose.Schema({
+  participants: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  }],
+  lastMessage: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Message'
+  },
+  unreadCount: {
+    type: Map,
+    of: Number,
+    default: {}
+  }
+}, {
+  timestamps: true
+});
+
+const Message = mongoose.model('Message', messageSchema);
+const Conversation = mongoose.model('Conversation', conversationSchema);
+
+module.exports = { Message, Conversation };
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const auth = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      throw new Error();
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+
+    if (!user) {
+      throw new Error();
+    }
+
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      message: 'Please authenticate'
+    });
+  }
+};
+
+module.exports = auth;
+const express = require('express');
+const router = express.Router();
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const auth = require('../middleware/auth');
+
+// Register
+router.post('/register', async (req, res) => {
+  try {
+    const { username, email, password, fullName } = req.body;
+    
+    // Check if user exists
+    const existingUser = await User.findOne({ 
+      $or: [{ email }, { username }] 
+    });
+    
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email or username'
+      });
+    }
+    
+    // Create new user
+    const user = new User({
+      username,
+      email,
+      password,
+      fullName
+    });
+    
+    await user.save();
+    
+    // Generate token
+    const token = jwt.sign(
+      { id: user._id, username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        fullName: user.fullName,
+        profilePicture: user.profilePicture
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Login
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    // Find user
+    const user = await User.findOne({ email }).select('+password');
+    
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+    
+    // Check password
+    const isMatch = await user.comparePassword(password);
+    
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+    
+    // Generate token
+    const token = jwt.sign(
+      { id: user._id, username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    // Update online status
+    user.isOnline = true;
+    user.lastSeen = new Date();
+    await user.save();
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        fullName: user.fullName,
+        profilePicture: user.profilePicture,
+        bio: user.bio,
+        friends: user.friends
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Get current user
+router.get('/me', auth, async (req, res) => {
+  res.json({
+    success: true,
+    user: req.user
+  });
+});
+
+// Logout
+router.post('/logout', auth, async (req, res) => {
+  try {
+    req.user.isOnline = false;
+    req.user.lastSeen = new Date();
+    await req.user.save();
+    
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+module.exports = router;
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const Post = require('../models/Post');
+
+// Create post
+router.post('/', auth, async (req, res) => {
+  try {
+    const { content, images, isPublic, tags } = req.body;
+    
+    const post = new Post({
+      user: req.user._id,
+      content,
+      images: images || [],
+      isPublic: isPublic !== undefined ? isPublic : true,
+      tags: tags || []
+    });
+    
+    await post.save();
+    
+    // Populate user data
+    await post.populate('user', 'username fullName profilePicture');
+    
+    res.status(201).json({
+      success: true,
+      post
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Get all posts (feed)
+router.get('/feed', auth, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    // Get posts from user and their friends
+    const posts = await Post.find({
+      $or: [
+        { user: req.user._id },
+        { user: { $in: req.user.friends } },
+        { isPublic: true }
+      ]
+    })
+    .populate('user', 'username fullName profilePicture')
+    .populate('likes', 'username fullName profilePicture')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
+    
+    const total = await Post.countDocuments({
+      $or: [
+        { user: req.user._id },
+        { user: { $in: req.user.friends } },
+        { isPublic: true }
+      ]
+    });
+    
+    res.json({
+      success: true,
+      posts,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Like/Unlike post
+router.post('/:id/like', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
+      });
+    }
+    
+    const alreadyLiked = post.likes.includes(req.user._id);
+    
+    if (alreadyLiked) {
+      post.likes = post.likes.filter(
+        userId => userId.toString() !== req.user._id.toString()
+      );
+    } else {
+      post.likes.push(req.user._id);
+    }
+    
+    await post.save();
+    
+    res.json({
+      success: true,
+      liked: !alreadyLiked,
+      likesCount: post.likes.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Add comment
+router.post('/:id/comments', auth, async (req, res) => {
+  try {
+    const { content } = req.body;
+    const post = await Post.findById(req.params.id);
+    
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
+      });
+    }
+    
+    const comment = {
+      user: req.user._id,
+      content
+    };
+    
+    post.comments.push(comment);
+    await post.save();
+    
+    // Populate user info in the new comment
+    const newComment = post.comments[post.comments.length - 1];
+    await newComment.populate('user', 'username fullName profilePicture');
+    
+    res.status(201).json({
+      success: true,
+      comment: newComment
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Delete post
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const post = await Post.findOneAndDelete({
+      _id: req.params.id,
+      user: req.user._id
+    });
+    
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found or unauthorized'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Post deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+module.exports = router;
+{
+  "name": "undercover-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.11.0",
+    "axios": "^1.4.0",
+    "socket.io-client": "^4.6.1",
+    "react-hook-form": "^7.45.0",
+    "@hookform/resolvers": "^3.1.1",
+    "yup": "^1.2.0",
+    "date-fns": "^2.30.0",
+    "react-icons": "^4.9.0",
+    "react-infinite-scroll-component": "^6.1.0",
+    "emoji-picker-react": "^4.4.9",
+    "react-dropzone": "^14.2.3",
+    "react-toastify": "^9.1.3"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "devDependencies": {
+    "react-scripts": "5.0.1",
+    "tailwindcss": "^3.3.2",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0"
+  }
+}
+FROM node:18-alpine as build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 3000
+CMD ["nginx", "-g", "daemon off;"]
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { ToastContainer } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
+import './App.css';
+
+// Layout Components
+import Navbar from './components/Navbar';
+import Sidebar from './components/Sidebar';
+
+// Pages
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Home from './pages/Home';
+import Profile from './pages/Profile';
+import Friends from './pages/Friends';
+import Messages from './pages/Messages';
+import Notifications from './pages/Notifications';
+
+// Context
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { SocketProvider } from './context/SocketContext';
+
+// Private Route Component
+const PrivateRoute = ({ children }) => {
+  const { isAuthenticated, loading } = useAuth();
+  
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+  
+  return isAuthenticated ? children : <Navigate to="/login" />;
+};
+
+function AppContent() {
+  const { isAuthenticated } = useAuth();
+  
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {isAuthenticated && <Navbar />}
+      
+      <div className="flex pt-16">
+        {isAuthenticated && <Sidebar />}
+        
+        <div className={`${isAuthenticated ? 'ml-64' : ''} flex-1`}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            
+            <Route path="/" element={
+              <PrivateRoute>
+                <Home />
+              </PrivateRoute>
+            } />
+            
+            <Route path="/profile/:username" element={
+              <PrivateRoute>
+                <Profile />
+              </PrivateRoute>
+            } />
+            
+            <Route path="/friends" element={
+              <PrivateRoute>
+                <Friends />
+              </PrivateRoute>
+            } />
+            
+            <Route path="/messages" element={
+              <PrivateRoute>
+                <Messages />
+              </PrivateRoute>
+            } />
+            
+            <Route path="/notifications" element={
+              <PrivateRoute>
+                <Notifications />
+              </PrivateRoute>
+            } />
+          </Routes>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <Router>
+      <AuthProvider>
+        <SocketProvider>
+          <AppContent />
+          <ToastContainer position="top-right" autoClose={3000} />
+        </SocketProvider>
+      </AuthProvider>
+    </Router>
+  );
+}
+
+export default App;
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import axios from 'axios';
+
+const AuthContext = createContext({});
+
+export const useAuth = () => useContext(AuthContext);
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [loading, setLoading] = useState(true);
+
+  // Configure axios
+  useEffect(() => {
+    if (token) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    } else {
+      delete axios.defaults.headers.common['Authorization'];
+    }
+  }, [token]);
+
+  useEffect(() => {
+    const loadUser = async () => {
+      if (token) {
+        try {
+          const response = await axios.get('http://localhost:5000/api/auth/me');
+          setUser(response.data.user);
+        } catch (error) {
+          localStorage.removeItem('token');
+          setToken(null);
+        }
+      }
+      setLoading(false);
+    };
+
+    loadUser();
+  }, [token]);
+
+  const login = async (email, password) => {
+    try {
+      const response = await axios.post('http://localhost:5000/api/auth/login', {
+        email,
+        password
+      });
+
+      const { token, user } = response.data;
+      localStorage.setItem('token', token);
+      setToken(token);
+      setUser(user);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.response?.data?.message || 'Login failed'
+      };
+    }
+  };
+
+  const register = async (userData) => {
+    try {
+      const response = await axios.post('http://localhost:5000/api/auth/register', userData);
+      
+      const { token, user } = response.data;
+      localStorage.setItem('token', token);
+      setToken(token);
+      setUser(user);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.response?.data?.message || 'Registration failed'
+      };
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await axios.post('http://localhost:5000/api/auth/logout');
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      localStorage.removeItem('token');
+      setToken(null);
+      setUser(null);
+    }
+  };
+
+  const updateUser = (updatedUser) => {
+    setUser(prev => ({ ...prev, ...updatedUser }));
+  };
+
+  const value = {
+    user,
+    token,
+    loading,
+    isAuthenticated: !!user,
+    login,
+    register,
+    logout,
+    updateUser
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import { 
+  FaSearch, 
+  FaHome, 
+  FaUserFriends, 
+  FaFacebookMessenger, 
+  FaBell, 
+  FaCaretDown,
+  FaUserCircle 
+} from 'react-icons/fa';
+
+const Navbar = () => {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  return (
+    <nav className="fixed top-0 left-0 right-0 bg-white shadow-md z-50">
+      <div className="max-w-7xl mx-auto px-4">
+        <div className="flex items-center justify-between h-16">
+          {/* Logo */}
+          <div className="flex items-center">
+            <Link to="/" className="text-2xl font-bold text-blue-600">
+              UnderCover
+            </Link>
+          </div>
+
+          {/* Search Bar */}
+          <div className="flex-1 max-w-2xl mx-4">
+            <div className="relative">
+              <FaSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search on UnderCover..."
+                className="w-full pl-10 pr-4 py-2 bg-gray-100 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+
+          {/* Navigation Icons */}
+          <div className="flex items-center space-x-4">
+            <Link to="/" className="p-2 hover:bg-gray-100 rounded-full">
+              <FaHome className="text-2xl text-gray-600" />
+            </Link>
+            
+            <Link to="/friends" className="p-2 hover:bg-gray-100 rounded-full">
+              <FaUserFriends className="text-2xl text-gray-600" />
+            </Link>
+            
+            <Link to="/messages" className="p-2 hover:bg-gray-100 rounded-full relative">
+              <FaFacebookMessenger className="text-2xl text-gray-600" />
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                3
+              </span>
+            </Link>
+            
+            <Link to="/notifications" className="p-2 hover:bg-gray-100 rounded-full relative">
+              <FaBell className="text-2xl text-gray-600" />
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                5
+              </span>
+            </Link>
+
+            {/* User Profile Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => setShowDropdown(!showDropdown)}
+                className="flex items-center space-x-2 p-2 hover:bg-gray-100 rounded-full"
+              >
+                {user?.profilePicture ? (
+                  <img
+                    src={user.profilePicture}
+                    alt={user.username}
+                    className="w-8 h-8 rounded-full"
+                  />
+                ) : (
+                  <FaUserCircle className="text-2xl text-gray-600" />
+                )}
+                <FaCaretDown />
+              </button>
+
+              {showDropdown && (
+                <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-10">
+                  <Link
+                    to={`/profile/${user?.username}`}
+                    className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                    onClick={() => setShowDropdown(false)}
+                  >
+                    Your Profile
+                  </Link>
+                  <button
+                    onClick={handleLogout}
+                    className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    Logout
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </nav>
+  );
+};
+
+export default Navbar;
+import React, { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { toast } from 'react-toastify';
+import axios from 'axios';
+import { FaImage, FaSmile, FaVideo } from 'react-icons/fa';
+import EmojiPicker from 'emoji-picker-react';
+
+const PostForm = ({ onPostCreated }) => {
+  const { user } = useAuth();
+  const [content, setContent] = useState('');
+  const [images, setImages] = useState([]);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!content.trim() && images.length === 0) {
+      toast.error('Please write something or add an image');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('content', content);
+      
+      images.forEach((image) => {
+        formData.append('images', image);
+      });
+
+      const response = await axios.post('http://localhost:5000/api/posts', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+
+      setContent('');
+      setImages([]);
+      toast.success('Post created successfully!');
+      
+      if (onPostCreated) {
+        onPostCreated(response.data.post);
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Failed to create post');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleImageChange = (e) => {
+    const files = Array.from(e.target.files);
+    setImages([...images, ...files]);
+  };
+
+  const removeImage = (index) => {
+    setImages(images.filter((_, i) => i !== index));
+  };
+
+  const onEmojiClick = (emojiObject) => {
+    setContent(prev => prev + emojiObject.emoji);
+    setShowEmojiPicker(false);
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+      <div className="flex items-center mb-4">
+        <img
+          src={user?.profilePicture || 'https://via.placeholder.com/40'}
+          alt={user?.username}
+          className="w-10 h-10 rounded-full mr-3"
+        />
+        <div>
+          <p className="font-semibold">{user?.fullName}</p>
+          <p className="text-sm text-gray-500">@{user?.username}</p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder={`What's on your mind, ${user?.fullName?.split(' ')[0]}?`}
+          className="w-full h-32 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+        />
+
+        {/* Preview Images */}
+        {images.length > 0 && (
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {images.map((image, index) => (
+              <div key={index} className="relative">
+                <img
+                  src={URL.createObjectURL(image)}
+                  alt={`Preview ${index}`}
+                  className="w-full h-32 object-cover rounded"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeImage(index)}
+                  className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mt-4 pt-4 border-t">
+          <div className="flex space-x-4">
+            <label className="flex items-center cursor-pointer text-gray-600 hover:text-blue-600">
+              <FaImage className="mr-2" />
+              <span>Photo/Video</span>
+              <input
+                type="file"
+                multiple
+                accept="image/*,video/*"
+                onChange={handleImageChange}
+                className="hidden"
+              />
+            </label>
+
+            <button
+              type="button"
+              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+              className="flex items-center text-gray-600 hover:text-blue-600"
+            >
+              <FaSmile className="mr-2" />
+              <span>Feeling/Activity</span>
+            </button>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSubmitting || (!content.trim() && images.length === 0)}
+            className="px-6 py-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSubmitting ? 'Posting...' : 'Post'}
+          </button>
+        </div>
+      </form>
+
+      {showEmojiPicker && (
+        <div className="absolute z-10">
+          <EmojiPicker onEmojiClick={onEmojiClick} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PostForm;
+import React, { useState, useEffect } from 'react';
+import InfiniteScroll from 'react-infinite-scroll-component';
+import axios from 'axios';
+import { toast } from 'react-toastify';
+import { useAuth } from '../context/AuthContext';
+
+// Components
+import PostForm from '../components/PostForm';
+import Post from '../components/Post';
+import SidebarRight from '../components/SidebarRight';
+
+const Home = () => {
+  const { user } = useAuth();
+  const [posts, setPosts] = useState([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(true);
+
+  const fetchPosts = async (pageNum = 1) => {
+    try {
+      const response = await axios.get(`http://localhost:5000/api/posts/feed?page=${pageNum}&limit=10`);
+      
+      if (pageNum === 1) {
+        setPosts(response.data.posts);
+      } else {
+        setPosts(prev => [...prev, ...response.data.posts]);
+      }
+      
+      setHasMore(response.data.posts.length === 10);
+      setPage(pageNum);
+    } catch (error) {
+      toast.error('Failed to load posts');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPosts(1);
+  }, []);
+
+  const handlePostCreated = (newPost) => {
+    setPosts(prev => [newPost, ...prev]);
+  };
+
+  const handleLike = async (postId) => {
+    try {
+      await axios.post(`http://localhost:5000/api/posts/${postId}/like`);
+      
+      setPosts(prev => prev.map(post => {
+        if (post._id === postId) {
+          const alreadyLiked = post.likes.some(like => like._id === user._id);
+          return {
+            ...post,
+            likes: alreadyLiked 
+              ? post.likes.filter(like => like._id !== user._id)
+              : [...post.likes, { _id: user._id, username: user.username }]
+          };
+        }
+        return post;
+      }));
+    } catch (error) {
+      toast.error('Failed to like post');
+    }
+  };
+
+  const handleComment = async (postId, content) => {
+    try {
+      const response = await axios.post(`http://localhost:5000/api/posts/${postId}/comments`, { content });
+      
+      setPosts(prev => prev.map(post => {
+        if (post._id === postId) {
+          return {
+            ...post,
+            comments: [...post.comments, response.data.comment]
+          };
+        }
+        return post;
+      }));
+    } catch (error) {
+      toast.error('Failed to add comment');
+    }
+  };
+
+  const loadMorePosts = () => {
+    fetchPosts(page + 1);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Left Sidebar - Empty for now */}
+        <div className="lg:col-span-1"></div>
+
+        {/* Main Content */}
+        <div className="lg:col-span-1">
+          <PostForm onPostCreated={handlePostCreated} />
+          
+          <InfiniteScroll
+            dataLength={posts.length}
+            next={loadMorePosts}
+            hasMore={hasMore}
+            loader={
+              <div className="flex justify-center my-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+              </div>
+            }
+            endMessage={
+              <p className="text-center text-gray-500 my-4">No more posts to show</p>
+            }
+          >
+            {posts.map((post) => (
+              <Post
+                key={post._id}
+                post={post}
+                onLike={handleLike}
+                onComment={handleComment}
+              />
+            ))}
+          </InfiniteScroll>
+        </div>
+
+        {/* Right Sidebar */}
+        <div className="lg:col-span-1">
+          <SidebarRight />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Home;
+#!/bin/bash
+
+echo "🚀 Starting UnderCover Social Media App..."
+
+# Check if Docker is installed
+if ! command -v docker &> /dev/null; then
+    echo "❌ Docker is not installed. Please install Docker first."
+    exit 1
+fi
+
+# Check if Docker Compose is installed
+if ! command -v docker-compose &> /dev/null; then
+    echo "❌ Docker Compose is not installed. Please install Docker Compose first."
+    exit 1
+fi
+
+# Create necessary directories
+mkdir -p ./server ./client ./database
+
+echo "📦 Building and starting containers..."
+docker-compose up --build -d
+
+echo "⏳ Waiting for services to start..."
+sleep 10
+
+echo "✅ UnderCover is running!"
+echo ""
+echo "🌐 Frontend: http://localhost:3000"
+echo "🔧 Backend API: http://localhost:5000"
+echo "🗄️  MongoDB: localhost:27017"
+echo ""
+echo "📝 To stop the application: docker-compose down"
+#!/bin/bash
+echo "🛑 Stopping UnderCover..."
+docker-compose down
+echo "✅ UnderCover stopped!"
+# Backend
+MONGODB_URI=mongodb://admin:password123@mongodb:27017/undercover?authSource=admin
+JWT_SECRET=undercover_secret_key_2024_change_this_in_production
+PORT=5000
+NODE_ENV=development
+
+# Frontend
+REACT_APP_API_URL=http://localhost:5000/api
+REACT_APP_WS_URL=ws://localhost:5000
